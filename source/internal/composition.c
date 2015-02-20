@@ -1,0 +1,269 @@
+/*
+	Copyright (C) 2014-2015 Quinten Lansu
+
+	Permission is hereby granted, free of charge, to any person
+	obtaining a copy of this software and associated documentation
+	files (the "Software"), to deal in the Software without
+	restriction, including without limitation the rights to use,
+	copy, modify, merge, publish, distribute, sublicense, and/or
+	sell copies of the Software, and to permit persons to whom the
+	Software is furnished to do so, subject to the following
+	conditions:
+
+	The above copyright notice and this permission notice shall be
+	included in all copies or substantial portions of the Software.
+
+	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+	EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+	OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+	NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+	HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+	WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+	FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+	OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+#include "composition.h"
+
+#include "codepoint.h"
+#include "database.h"
+
+uint8_t compose_initialize(ComposeState* state, StreamState* input, StreamState* output, uint8_t compatibility)
+{
+	memset(state, 0, sizeof(ComposeState));
+
+	/* Ensure streams are valid */
+
+	if (input == 0 ||
+		output == 0)
+	{
+		return 0;
+	}
+
+	/* Set up streams */
+
+	state->input = input;
+
+	state->output = output;
+	memset(state->output, 0, sizeof(StreamState));
+
+	/* Set up codepoint quickcheck property */
+
+	state->property = (compatibility == 1)
+		? UnicodeProperty_Normalization_Compatibility_Compose
+		: UnicodeProperty_Normalization_Compose;
+
+	return 1;
+}
+
+uint8_t compose_readcodepoint(ComposeState* state, uint8_t index)
+{
+	if (state->input->index == state->input->current)
+	{
+		if (!stream_read(state->input, state->property))
+		{
+			/* End of data */
+
+			state->input->index = 0;
+			state->input->current = 0;
+
+			return 0;
+		}
+		else
+		{
+			/* First codepoint in next sequence */
+
+			state->output->codepoint[index]                  = state->input->codepoint[0];
+			state->output->quick_check[index]                = state->input->quick_check[0];
+			state->output->canonical_combining_class[index]  = state->input->canonical_combining_class[0];
+
+			state->input->index = 1;
+		}
+	}
+	else
+	{
+		/* Use next codepoint from current sequence */
+
+		state->output->codepoint[index]                  = state->input->codepoint[state->input->index];
+		state->output->quick_check[index]                = state->input->quick_check[state->input->index];
+		state->output->canonical_combining_class[index]  = state->input->canonical_combining_class[state->input->index];
+
+		state->input->index++;
+	}
+
+	state->output->current++;
+
+	return 1;
+}
+
+unicode_t compose_execute(ComposeState* state)
+{
+	uint8_t cache_start = 0;
+
+	if (state->input == 0 ||
+		state->finished)
+	{
+		return 0;
+	}
+
+	state->output->current = 0;
+
+	state->cache_current = cache_start;
+	state->cache_next = cache_start + 1;
+
+	if (!compose_readcodepoint(state, state->cache_current))
+	{
+		return 0;
+	}
+
+	while (1)
+	{
+		while (state->output->canonical_combining_class[state->cache_current] != 0)
+		{
+			state->cache_current++;
+
+			if (state->cache_current == state->output->current &&
+				!compose_readcodepoint(state, state->cache_current))
+			{
+				return 1;
+			}
+
+			state->cache_next = state->cache_current + 1;
+		}
+
+		while (
+			state->cache_next < state->output->current ||
+			compose_readcodepoint(state, state->cache_next))
+		{
+			if (state->output->quick_check[state->cache_next] != QuickCheckResult_Yes &&
+				(state->output->canonical_combining_class[state->cache_next] == 0 &&
+				state->output->canonical_combining_class[state->cache_next - 1] == 0) ||
+				state->output->canonical_combining_class[state->cache_next] > state->output->canonical_combining_class[state->cache_next - 1])
+			{
+				unicode_t composed = 0;
+
+				/*
+					Hangul composition
+
+					Algorithm adapted from Unicode Technical Report #15:
+					http://www.unicode.org/reports/tr15/tr15-18.html#Hangul
+				*/
+
+				if (state->output->codepoint[state->cache_current] >= HANGUL_L_FIRST &&
+					state->output->codepoint[state->cache_current] <= HANGUL_L_LAST)
+				{
+					/* Check for Hangul LV pair */ 
+
+					if (state->output->codepoint[state->cache_next] >= HANGUL_V_FIRST &&
+						state->output->codepoint[state->cache_next] <= HANGUL_V_LAST)
+					{
+						unicode_t l_index = state->output->codepoint[state->cache_current] - HANGUL_L_FIRST;
+						unicode_t v_index = state->output->codepoint[state->cache_next] - HANGUL_V_FIRST;
+
+						composed = HANGUL_S_FIRST + (((l_index * HANGUL_V_COUNT) + v_index) * HANGUL_T_COUNT);
+					}
+				}
+				else if (
+					state->output->codepoint[state->cache_current] >= HANGUL_S_FIRST &&
+					state->output->codepoint[state->cache_current] <= HANGUL_S_LAST)
+				{
+					/* Check for Hangul LV and T pair */ 
+
+					if (state->output->codepoint[state->cache_next] >= HANGUL_T_FIRST &&
+						state->output->codepoint[state->cache_next] <= HANGUL_T_LAST)
+					{
+						unicode_t t_index = state->output->codepoint[state->cache_next] - HANGUL_T_FIRST;
+
+						composed = state->output->codepoint[state->cache_current] + t_index;
+					}
+				}
+				else
+				{
+					/* Attempt to compose codepoints */
+
+					composed = database_querycomposition(
+						state->output->codepoint[state->cache_current],
+						state->output->codepoint[state->cache_next]);
+				}
+
+				if (composed != 0)
+				{
+					state->output->codepoint[state->cache_current]                  = composed;
+					state->output->quick_check[state->cache_current]                = database_queryproperty(composed, state->property);
+					state->output->canonical_combining_class[state->cache_current]  = database_queryproperty(composed, UnicodeProperty_CanonicalCombiningClass);
+
+					state->output->codepoint[state->cache_next]                  = 0;
+					state->output->quick_check[state->cache_next]                = 0;
+					state->output->canonical_combining_class[state->cache_next]  = 0;
+
+					if (state->cache_next == state->output->current - 1)
+					{
+						state->output->current--;
+					}
+
+					state->cache_current = cache_start;
+					state->cache_next = cache_start;
+				}
+			}
+			else if (
+				state->output->canonical_combining_class[state->cache_next] == 0)
+			{
+				break;
+			}
+
+			state->cache_next++;
+		}
+
+		if (state->cache_current + 1 >= state->output->current)
+		{
+			break;
+		}
+
+		if (state->output->current > 1)
+		{
+			uint8_t write_index = 0;
+			uint8_t read_index = 1;
+
+			while (write_index < state->output->current)
+			{
+				if (read_index < state->output->current &&
+					state->output->codepoint[read_index] == 0)
+				{
+					while (
+						read_index < state->output->current &&
+						state->output->codepoint[read_index] == 0)
+					{
+						read_index++;
+					}
+
+					if (read_index == state->output->current)
+					{
+						break;
+					}
+
+					state->output->codepoint[write_index]                  = state->output->codepoint[read_index];
+					state->output->quick_check[write_index]                = state->output->quick_check[read_index];
+					state->output->canonical_combining_class[write_index]  = state->output->canonical_combining_class[read_index];
+				}
+
+				write_index++;
+				read_index++;
+			}
+
+			state->output->current = write_index;
+
+			state->cache_current++;
+			state->cache_next = write_index;
+		}
+		else
+		{
+			state->finished = 1;
+
+			break;
+		}
+
+		cache_start++;
+	}
+
+	return 1;
+}
