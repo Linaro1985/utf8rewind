@@ -125,7 +125,7 @@ class CaseMappingIntegrationSuite(IntegrationSuite):
 			else:
 				converted_titlecase = libs.utf8.codepointToUtf8(r.codepoint)[0]
 			
-			self.header.writeLine("CHECK_UTF8_CASEMAPPING(" + converted_codepoint + ", \"" + converted_uppercase + "\", \"" + converted_lowercase + "\", \"" + converted_titlecase + "\", \"" + r.name + "\");")
+			self.header.writeLine("CHECK_CASEMAPPING(" + converted_codepoint + ", \"" + converted_uppercase + "\", \"" + converted_lowercase + "\", \"" + converted_titlecase + "\", \"" + r.name + "\");")
 		
 		self.header.outdent()
 		self.header.write("}")
@@ -339,6 +339,111 @@ class CompositionExclusionIntegrationSuite(IntegrationSuite):
 			self.entries.append(entry)
 		return True
 
+class QuickCheckEntry:
+	def __init__(self, codepoint):
+		self.codepoint = codepoint
+		self.nfc = "YES"
+		self.nfd = "YES"
+		self.nfkc = "YES"
+		self.nfkd = "YES"
+
+class QuickCheckGroup:
+	def __init__(self, block):
+		self.block = block
+		self.entries = []
+
+class IsNormalizedIntegrationSuite(IntegrationSuite):
+	def __init__(self, db):
+		self.db = db
+		self.entries = dict()
+		self.groups = dict()
+	
+	def execute(self):
+		print "Parsing quickcheck records..."
+		
+		records_list = [
+			{
+				"record": "qcNFCRecords",
+				"target": "nfc"
+			},
+			{
+				"record": "qcNFDRecords",
+				"target": "nfd"
+			},
+			{
+				"record": "qcNFKCRecords",
+				"target": "nfkc"
+			},
+			{
+				"record": "qcNFKDRecords",
+				"target": "nfkd"
+			},
+		]
+		
+		value_map = {
+			1: "MAYBE",
+			2: "NO"
+		}
+		
+		for i in records_list:
+			for r in db.__dict__[i["record"]]:
+				str_value = value_map[r.value]
+				
+				for c in range(r.start, r.start + r.count + 1):
+					if c in self.entries:
+						e = self.entries[c]
+					else:
+						e = QuickCheckEntry(c)
+						self.entries[c] = e
+					e.__dict__[i["target"]] = str_value
+		
+		for e in self.entries.itervalues():
+			block = self.db.getBlockByCodepoint(e.codepoint)
+			if block in self.groups:
+				group = self.groups[block]
+			else:
+				group = QuickCheckGroup(block)
+				self.groups[block] = group
+			
+			group.entries.append(e)
+		
+		print "Writing is-normalized tests..."
+		
+		self.open('/../../source/tests/integration-isnormalized.cpp')
+		
+		self.header.write("#include \"helpers-normalization.hpp\"")
+		
+		for key, value in sorted(self.groups.iteritems(), key = lambda block: block[0].start):
+			if key.start == 0xAC00 and key.end == 0xD7AF:
+				# ignore hangul syllables
+				continue
+			
+			self.writeBlockSection(sorted(value.entries, key = lambda entry: entry.codepoint), key.name)
+	
+	def writeBlockSection(self, entries, title, limit = 2000):
+		if len(entries) > limit:
+			for i in xrange(0, len(entries), limit):
+				chunk = entries[i:i + limit]
+				self.writeBlockSection(chunk, title + " Part" + str((i / limit) + 1), limit)
+			return
+		
+		title = re.sub('[^\w ]', '', title.title()).replace(' ', '')
+		
+		print "Writing tests \"" + title + "\""
+		
+		self.header.newLine()
+		
+		self.header.newLine()
+		self.header.writeLine("TEST(IsNormalized, " + title + ")")
+		self.header.writeLine("{")
+		self.header.indent()
+		
+		for e in entries:
+			self.header.writeLine("CHECK_IS_NORMALIZED(0x" + format(e.codepoint, '08X') + ", " + e.nfd + ", " + e.nfc + ", " + e.nfkd + ", " + e.nfkc + ", \"" + self.db.records[e.codepoint].name + "\");")
+		
+		self.header.outdent()
+		self.header.write("}")
+		
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Parse Unicode codepoint database and write integration tests.')
 	parser.add_argument(
@@ -359,9 +464,15 @@ if __name__ == '__main__':
 		action = 'store_true',
 		help = 'write normalization tests'
 	)
+	parser.add_argument(
+		'--is-normalized',
+		dest = 'isnormalized',
+		action = 'store_true',
+		help = 'write is-normalized tests'
+	)
 	args = parser.parse_args()
 	
-	if not args.casemapping and not args.normalization:
+	if not args.casemapping and not args.normalization and not args.isnormalized:
 		all = True
 	else:
 		all = False
@@ -375,4 +486,8 @@ if __name__ == '__main__':
 	
 	if all or args.normalization:
 		suite = NormalizationIntegrationSuite(db)
+		suite.execute()
+	
+	if all or args.isnormalized:
+		suite = IsNormalizedIntegrationSuite(db)
 		suite.execute()
