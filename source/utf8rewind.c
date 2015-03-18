@@ -36,61 +36,60 @@
 
 size_t utf8len(const char* text)
 {
-	const char* src;
-	size_t src_index;
-	size_t length = 0;
-	size_t codepoint_length = 0;
-	size_t text_length = 0;
-	uint8_t codepoint = 0;
+	const uint8_t* src;
+	size_t src_length;
+	size_t length;
 
-	if (text == 0)
+	/* Validate input */
+
+	if (text == 0 ||
+		text[0] == 0)
 	{
-		return length;
+		return 0;
 	}
 
-	text_length = strlen(text);
-	if (text_length == 0)
-	{
-		return length;
-	}
+	length = 0;
 
-	while (*text != 0)
-	{
-		codepoint = (uint8_t)*text;
+	/* Determine length in codepoints */
 
-		codepoint_length = codepoint_decoded_length[codepoint];
-		if (codepoint_length != 0)
+	src = (const uint8_t*)text;
+	src_length = strlen(text);
+
+	while (src_length > 0)
+	{
+		uint8_t src_offset = 1;
+
+		/* Check if the current byte is part of a multi-byte sequence */
+
+		uint8_t codepoint_length = codepoint_decoded_length[(uint8_t)*src];
+		if (codepoint_length > 1)
 		{
-			/* Check if encoding is valid */
+			/* Check every byte of the sequence */
 
-			src = text + 1;
-
-			for (src_index = 1; src_index < codepoint_length; ++src_index)
+			do
 			{
-				if ((*src & 0x80) == 0)
+				if (src[src_offset] < 0x80 ||  /* Not a continuation byte */
+					src[src_offset] > 0xBF)    /* Start of a new sequence */
 				{
-					/* Not a continuation byte for a multi-byte sequence */
-
 					break;
 				}
-
-				src++;
 			}
+			while (++src_offset < codepoint_length);
 		}
-		else
-		{
-			src_index = 1;
-		}
+
+		/* Found a codepoint */
 
 		length++;
 
-		if (src_index > text_length)
+		/* Move cursor */
+
+		if (src_offset >= src_length)
 		{
 			break;
 		}
 
-		text += src_index;
-		text_length -= src_index;
+		src += src_offset;
+		src_length -= src_offset;
 	}
 
 	return length;
@@ -98,17 +97,24 @@ size_t utf8len(const char* text)
 
 size_t utf16toutf8(const utf16_t* input, size_t inputSize, char* target, size_t targetSize, int32_t* errors)
 {
-	const utf16_t* src = input;
-	size_t src_size = inputSize;
-	char* dst = target;
-	size_t dst_size = targetSize;
+	const utf16_t* src;
+	size_t src_size;
+	char* dst;
+	size_t dst_size;
 	size_t bytes_written = 0;
 
-	if (input == 0 ||
-		inputSize < sizeof(utf16_t))
-	{
-		goto invaliddata;
-	}
+	/* Validate parameters */
+
+	UTF8_VALIDATE_PARAMETERS(utf16_t, char, bytes_written);
+
+	/* Setup cursors */
+
+	src = input;
+	src_size = inputSize;
+	dst = target;
+	dst_size = targetSize;
+
+	/* Loop over input */
 
 	while (src_size > 0)
 	{
@@ -125,14 +131,16 @@ size_t utf16toutf8(const utf16_t* input, size_t inputSize, char* target, size_t 
 		{
 			utf16_t surrogate_low;
 
+			/* Decode surrogate pair */
+
 			if (codepoint > SURROGATE_HIGH_END)
 			{
-				goto unmatchedhigh;
+				UTF8_RETURN(UNMATCHED_HIGH_SURROGATE_PAIR, bytes_written);
 			}
 
 			if (src_size < sizeof(utf16_t))
 			{
-				goto invaliddata;
+				UTF8_RETURN(INVALID_DATA, bytes_written);
 			}
 
 			src++;
@@ -143,11 +151,11 @@ size_t utf16toutf8(const utf16_t* input, size_t inputSize, char* target, size_t 
 			if (surrogate_low < SURROGATE_LOW_START ||
 				surrogate_low > SURROGATE_LOW_END)
 			{
-				goto unmatchedlow;
+				UTF8_RETURN(UNMATCHED_LOW_SURROGATE_PAIR, bytes_written);
 			}
 
 			codepoint =
-				0x10000 +
+				(MAX_BASIC_MULTILINGUAR_PLANE + 1) +
 				(surrogate_low - SURROGATE_LOW_START) +
 				((codepoint - SURROGATE_HIGH_START) << 10);
 		}
@@ -155,7 +163,7 @@ size_t utf16toutf8(const utf16_t* input, size_t inputSize, char* target, size_t 
 		encoded_size = codepoint_write(codepoint, &dst, &dst_size);
 		if (encoded_size == 0)
 		{
-			goto outofspace;
+			UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 		}
 
 		bytes_written += encoded_size;
@@ -164,50 +172,29 @@ size_t utf16toutf8(const utf16_t* input, size_t inputSize, char* target, size_t 
 		src_size -= sizeof(utf16_t);
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
-
-unmatchedhigh:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_UNMATCHED_HIGH_SURROGATE_PAIR;
-	}
-	return bytes_written;
-
-unmatchedlow:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_UNMATCHED_LOW_SURROGATE_PAIR;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t utf32toutf8(const unicode_t* input, size_t inputSize, char* target, size_t targetSize, int32_t* errors)
 {
-	const unicode_t* src = input;
-	size_t src_size = inputSize;
-	char* dst = target;
-	size_t dst_size = targetSize;
+	const unicode_t* src;
+	size_t src_size;
+	char* dst;
+	size_t dst_size;
 	size_t bytes_written = 0;
 
-	if (input == 0 ||
-		inputSize < sizeof(unicode_t))
-	{
-		goto invaliddata;
-	}
+	/* Validate parameters */
+
+	UTF8_VALIDATE_PARAMETERS(unicode_t, char, bytes_written);
+
+	/* Setup cursors */
+
+	src = input;
+	src_size = inputSize;
+	dst = target;
+	dst_size = targetSize;
+
+	/* Loop over input */
 
 	while (src_size > 0)
 	{
@@ -224,14 +211,16 @@ size_t utf32toutf8(const unicode_t* input, size_t inputSize, char* target, size_
 		{
 			unicode_t surrogate_low;
 
+			/* Decode surrogate pair */
+
 			if (codepoint > SURROGATE_HIGH_END)
 			{
-				goto unmatchedhigh;
+				UTF8_RETURN(UNMATCHED_HIGH_SURROGATE_PAIR, bytes_written);
 			}
 
 			if (src_size < sizeof(unicode_t))
 			{
-				goto invaliddata;
+				UTF8_RETURN(INVALID_DATA, bytes_written);
 			}
 
 			src++;
@@ -242,11 +231,11 @@ size_t utf32toutf8(const unicode_t* input, size_t inputSize, char* target, size_
 			if (surrogate_low < SURROGATE_LOW_START ||
 				surrogate_low > SURROGATE_LOW_END)
 			{
-				goto unmatchedlow;
+				UTF8_RETURN(UNMATCHED_LOW_SURROGATE_PAIR, bytes_written);
 			}
 
 			codepoint =
-				0x10000 +
+				(MAX_BASIC_MULTILINGUAR_PLANE + 1) +
 				(surrogate_low - SURROGATE_LOW_START) +
 				((codepoint - SURROGATE_HIGH_START) << 10);
 		}
@@ -254,7 +243,7 @@ size_t utf32toutf8(const unicode_t* input, size_t inputSize, char* target, size_
 		encoded_size = codepoint_write(codepoint, &dst, &dst_size);
 		if (encoded_size == 0)
 		{
-			goto outofspace;
+			UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 		}
 
 		bytes_written += encoded_size;
@@ -263,35 +252,7 @@ size_t utf32toutf8(const unicode_t* input, size_t inputSize, char* target, size_
 		src_size -= sizeof(unicode_t);
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
-
-unmatchedhigh:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_UNMATCHED_HIGH_SURROGATE_PAIR;
-	}
-	return bytes_written;
-
-unmatchedlow:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_UNMATCHED_LOW_SURROGATE_PAIR;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t widetoutf8(const wchar_t* input, size_t inputSize, char* target, size_t targetSize, int32_t* errors)
@@ -307,48 +268,44 @@ size_t widetoutf8(const wchar_t* input, size_t inputSize, char* target, size_t t
 
 size_t utf8toutf16(const char* input, size_t inputSize, utf16_t* target, size_t targetSize, int32_t* errors)
 {
-	const char* src = input;
-	size_t src_length = inputSize;
-	utf16_t* dst = target;
-	size_t dst_size = targetSize;
+	const char* src;
+	size_t src_size;
+	utf16_t* dst;
+	size_t dst_size;
 	size_t bytes_written = 0;
 
-	if (input == 0 ||
-		inputSize == 0)
-	{
-		goto invaliddata;
-	}
+	/* Validate parameters */
 
-	if (target != 0 &&
-		targetSize < sizeof(utf16_t))
-	{
-		goto outofspace;
-	}
+	UTF8_VALIDATE_PARAMETERS(char, utf16_t, bytes_written);
 
-	while (src_length > 0)
+	/* Setup cursors */
+
+	src = input;
+	src_size = inputSize;
+	dst = target;
+	dst_size = targetSize;
+
+	/* Loop over input */
+
+	while (src_size > 0)
 	{
 		unicode_t decoded;
-		uint8_t decoded_size = codepoint_read(src, src_length, &decoded);
+		uint8_t decoded_size = codepoint_read(src, src_size, &decoded);
 
 		if (decoded <= MAX_BASIC_MULTILINGUAR_PLANE)
 		{
+			/* Codepoint fits in a single UTF-16 codepoint */
+
 			if (dst != 0)
 			{
+				/* Write to output */
+
 				if (dst_size < sizeof(utf16_t))
 				{
-					goto outofspace;
+					UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 				}
 
-				if (decoded >= SURROGATE_HIGH_START &&
-					decoded <= SURROGATE_LOW_END)
-				{
-					*dst++ = REPLACEMENT_CHARACTER;
-				}
-				else
-				{
-					*dst++ = (utf16_t)decoded;
-				}
-
+				*dst++ = (utf16_t)decoded;
 				dst_size -= sizeof(utf16_t);
 			}
 
@@ -356,76 +313,69 @@ size_t utf8toutf16(const char* input, size_t inputSize, utf16_t* target, size_t 
 		}
 		else
 		{
+			/* Codepoint must be encoded using a surrogate pair */
+
 			if (dst != 0)
 			{
-				/* Codepoint must be converted to a surrogate pair. */
+				/* Write to output */
 
 				if (dst_size < sizeof(unicode_t))
 				{
-					goto outofspace;
+					UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 				}
 
-				decoded -= 0x10000;
-				*dst++ = (decoded >> 10) + SURROGATE_HIGH_START;
-				*dst++ = (decoded & 0x3FF) + SURROGATE_LOW_START;
+				/* Encoded value is always beyond BMP */
 
-				dst_size -= sizeof(unicode_t);
+				decoded -= (MAX_BASIC_MULTILINGUAR_PLANE + 1);
+				*dst++ = SURROGATE_HIGH_START + (decoded >> 10);
+				*dst++ = SURROGATE_LOW_START + (decoded & 0x03FF);
+
+				dst_size -= 2 * sizeof(utf16_t);
 			}
 
-			bytes_written += sizeof(unicode_t);
+			bytes_written += 2 * sizeof(utf16_t);
 		}
 
 		src += decoded_size;
-		src_length -= decoded_size;
+		src_size -= decoded_size;
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t utf8toutf32(const char* input, size_t inputSize, unicode_t* target, size_t targetSize, int32_t* errors)
 {
-	const char* src = input;
-	size_t src_length = inputSize;
-	unicode_t* dst = target;
-	size_t dst_size = targetSize;
+	const char* src;
+	size_t src_size;
+	unicode_t* dst;
+	size_t dst_size;
 	size_t bytes_written = 0;
 
-	if (input == 0 ||
-		inputSize == 0)
-	{
-		goto invaliddata;
-	}
+	/* Validate parameters */
 
-	if (target != 0 &&
-		targetSize < sizeof(unicode_t))
-	{
-		goto outofspace;
-	}
+	UTF8_VALIDATE_PARAMETERS(char, unicode_t, bytes_written);
 
-	while (src_length > 0)
+	/* Setup cursors */
+
+	src = input;
+	src_size = inputSize;
+	dst = target;
+	dst_size = targetSize;
+
+	/* Loop over input */
+
+	while (src_size > 0)
 	{
 		unicode_t decoded;
-		uint8_t decoded_length = codepoint_read(src, src_length, &decoded);
+		uint8_t decoded_length = codepoint_read(src, src_size, &decoded);
 
 		if (dst != 0)
 		{
+			/* Write to output */
+
 			if (dst_size < sizeof(unicode_t))
 			{
-				goto outofspace;
+				UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 			}
 
 			*dst++ = decoded;
@@ -435,24 +385,10 @@ size_t utf8toutf32(const char* input, size_t inputSize, unicode_t* target, size_
 		bytes_written += sizeof(unicode_t);
 
 		src += decoded_length;
-		src_length -= decoded_length;
+		src_size -= decoded_length;
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t utf8towide(const char* input, size_t inputSize, wchar_t* target, size_t targetSize, int32_t* errors)
@@ -516,15 +452,15 @@ size_t utf8toupper(const char* input, size_t inputSize, char* target, size_t tar
 	CaseMappingState state;
 	size_t bytes_written = 0;
 
-	/* Validate input */
+	/* Validate parameters */
 
-	UTF8_VALIDATE_INPUT;
+	UTF8_VALIDATE_PARAMETERS(char, char, bytes_written);
 
 	/* Initialize case mapping */
 
 	if (!casemapping_initialize(&state, input, inputSize, target, targetSize, UnicodeProperty_Uppercase))
 	{
-		return bytes_written;
+		UTF8_RETURN(NONE, bytes_written);
 	}
 
 	/* Execute case mapping as long as input remains */
@@ -534,34 +470,13 @@ size_t utf8toupper(const char* input, size_t inputSize, char* target, size_t tar
 		size_t result = casemapping_execute(&state);
 		if (!result)
 		{
-			goto outofspace;
+			UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 		}
 
 		bytes_written += result;
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-overlap:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_OVERLAPPING_PARAMETERS;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t utf8tolower(const char* input, size_t inputSize, char* target, size_t targetSize, int32_t* errors)
@@ -569,15 +484,15 @@ size_t utf8tolower(const char* input, size_t inputSize, char* target, size_t tar
 	CaseMappingState state;
 	size_t bytes_written = 0;
 
-	/* Validate input */
+	/* Validate parameters */
 
-	UTF8_VALIDATE_INPUT;
+	UTF8_VALIDATE_PARAMETERS(char, char, bytes_written);
 
 	/* Initialize case mapping */
 
 	if (!casemapping_initialize(&state, input, inputSize, target, targetSize, UnicodeProperty_Lowercase))
 	{
-		return bytes_written;
+		UTF8_RETURN(NONE, bytes_written);
 	}
 
 	/* Execute case mapping as long as input remains */
@@ -587,34 +502,13 @@ size_t utf8tolower(const char* input, size_t inputSize, char* target, size_t tar
 		size_t result = casemapping_execute(&state);
 		if (!result)
 		{
-			goto outofspace;
+			UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 		}
 
 		bytes_written += result;
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-overlap:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_OVERLAPPING_PARAMETERS;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 size_t utf8totitle(const char* input, size_t inputSize, char* target, size_t targetSize, int32_t* errors)
@@ -622,15 +516,15 @@ size_t utf8totitle(const char* input, size_t inputSize, char* target, size_t tar
 	CaseMappingState state;
 	size_t bytes_written = 0;
 
-	/* Validate input */
+	/* Validate parameters */
 
-	UTF8_VALIDATE_INPUT;
+	UTF8_VALIDATE_PARAMETERS(char, char, bytes_written);
 
 	/* Initialize case mapping */
 
 	if (!casemapping_initialize(&state, input, inputSize, target, targetSize, UnicodeProperty_Titlecase))
 	{
-		return bytes_written;
+		UTF8_RETURN(NONE, bytes_written);
 	}
 
 	/* Execute case mapping as long as input remains */
@@ -640,7 +534,7 @@ size_t utf8totitle(const char* input, size_t inputSize, char* target, size_t tar
 		size_t result = casemapping_execute(&state);
 		if (!result)
 		{
-			goto outofspace;
+			UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 		}
 
 		/* The first letter of every word should be titlecase, the rest lowercase */
@@ -660,28 +554,7 @@ size_t utf8totitle(const char* input, size_t inputSize, char* target, size_t tar
 		bytes_written += result;
 	}
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-overlap:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_OVERLAPPING_PARAMETERS;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
 
 uint8_t utf8isnormalized(const char* input, size_t inputSize, size_t flags, size_t* offset)
@@ -934,12 +807,12 @@ size_t utf8normalize(const char* input, size_t inputSize, char* target, size_t t
 
 	if ((flags & (UTF8_NORMALIZE_DECOMPOSE | UTF8_NORMALIZE_COMPOSE)) == 0)
 	{
-		goto invalidflag;
+		UTF8_RETURN(INVALID_FLAG, bytes_written);
 	}
 
-	/* Validate input */
+	/* Validate parameters */
 
-	UTF8_VALIDATE_INPUT;
+	UTF8_VALIDATE_PARAMETERS(char, char, bytes_written);
 
 	/* Initialize decomposition */
 
@@ -948,7 +821,7 @@ size_t utf8normalize(const char* input, size_t inputSize, char* target, size_t t
 	if (!stream_initialize(&stream[0], input, inputSize) ||
 		!decompose_initialize(&decompose_state, &stream[0], &stream[1], compatibility))
 	{
-		goto invaliddata;
+		UTF8_RETURN(INVALID_DATA, bytes_written);
 	}
 
 	stream_output = &stream[2];
@@ -959,7 +832,7 @@ size_t utf8normalize(const char* input, size_t inputSize, char* target, size_t t
 
 		if (!compose_initialize(&compose_state, &stream[2], &stream[3], compatibility))
 		{
-			goto invaliddata;
+			UTF8_RETURN(INVALID_DATA, bytes_written);
 		}
 
 		stream_output = &stream[3];
@@ -1045,7 +918,7 @@ size_t utf8normalize(const char* input, size_t inputSize, char* target, size_t t
 				uint8_t encoded_size = codepoint_write(stream_output->codepoint[i], &dst, &dst_size);
 				if (encoded_size == 0)
 				{
-					goto outofspace;
+					UTF8_RETURN(NOT_ENOUGH_SPACE, bytes_written);
 				}
 
 				bytes_written += encoded_size;
@@ -1059,33 +932,5 @@ size_t utf8normalize(const char* input, size_t inputSize, char* target, size_t t
 	}
 	while (!finished);
 
-	return bytes_written;
-
-invaliddata:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_DATA;
-	}
-	return bytes_written;
-
-invalidflag:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_INVALID_FLAG;
-	}
-	return bytes_written;
-
-overlap:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_OVERLAPPING_PARAMETERS;
-	}
-	return bytes_written;
-
-outofspace:
-	if (errors != 0)
-	{
-		*errors = UTF8_ERR_NOT_ENOUGH_SPACE;
-	}
-	return bytes_written;
+	UTF8_RETURN(NONE, bytes_written);
 }
