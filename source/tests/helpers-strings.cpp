@@ -209,6 +209,42 @@ namespace helpers {
 		}
 	}
 
+	std::string hex(unicode_t codepoint)
+	{
+		return hex(utf8(codepoint));
+	}
+
+	std::string hex(unicode_t* codepoints, size_t codepointsSize)
+	{
+		std::string converted;
+
+		int32_t errors;
+		size_t size_in_bytes = utf32toutf8(codepoints, codepointsSize, nullptr, 0, &errors);
+
+		if (size_in_bytes == 0 ||
+			errors != UTF8_ERR_NONE)
+		{
+			return converted;
+		}
+
+		converted.resize(size_in_bytes);
+		utf32toutf8(codepoints, codepointsSize, &converted[0], size_in_bytes, nullptr);
+
+		return hex(converted);
+	}
+
+	std::string hex(const std::string& text)
+	{
+		std::stringstream ss;
+
+		for (std::string::const_iterator it = text.begin(); it != text.end(); ++it)
+		{
+			ss << "\\x" << std::uppercase << std::setfill('0') << std::hex << std::setw(2) << ((unicode_t)*it & 0x000000FF);
+		}
+
+		return ss.str();
+	}
+
 	std::string printable(unicode_t codepoint)
 	{
 		return printable(utf8(codepoint));
@@ -473,6 +509,37 @@ namespace helpers {
 		}
 	}
 
+	::testing::AssertionResult CompareOffsets(
+		const char* expressionExpected GTEST_ATTRIBUTE_UNUSED_, const char* expressionActual GTEST_ATTRIBUTE_UNUSED_, const char* expressionCount GTEST_ATTRIBUTE_UNUSED_,
+		const char* offsetExpected, const char* offsetActual, const char* offsetStart)
+	{
+		if (offsetExpected == offsetActual)
+		{
+			return ::testing::AssertionSuccess();
+		}
+		else
+		{
+			::testing::AssertionResult result = ::testing::AssertionFailure();
+
+			result << "Offset mismatch." << std::endl;
+
+			result << std::endl;
+
+			result
+				<< "[Offset]" << std::endl
+				<< "    Actual: " << (ptrdiff_t)(offsetActual - offsetStart) << std::endl
+				<< "  Expected: " << (ptrdiff_t)(offsetExpected - offsetStart) << std::endl;
+
+			result << std::endl;
+
+			result
+				<< "[Text]" << std::endl
+				<< "    Actual: \"" << printable(offsetActual) << "\"" << std::endl
+				<< "  Expected: \"" << printable(offsetExpected) << "\"" << std::endl;
+
+			return result;
+		}
+	}
 
 	::testing::AssertionResult CompareMemory(
 		const char* expressionExpected GTEST_ATTRIBUTE_UNUSED_, const char* expressionActual GTEST_ATTRIBUTE_UNUSED_, const char* expressionCount GTEST_ATTRIBUTE_UNUSED_,

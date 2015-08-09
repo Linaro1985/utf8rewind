@@ -27,80 +27,140 @@
 
 #include "codepoint.h"
 
-const char* seeking_forward(const char* src, const char* srcEnd, size_t srcLength, off_t offset)
+const char* seeking_forward(const char* input, const char* inputEnd, size_t inputLength, off_t offset)
 {
-	size_t i;
-
-	if (srcEnd <= src || offset <= 0 || srcLength == 0)
+	if (inputEnd <= input ||  /* Swapped parameters */
+		offset <= 0 ||        /* Invalid offset */
+		inputLength == 0)     /* Nothing to do */
 	{
-		return src;
+		return input;
 	}
-	if (offset >= (off_t)srcLength)
+	else if (
+		offset >= (off_t)inputLength)  /* Out of bounds */
 	{
-		return srcEnd;
+		return inputEnd;
 	}
 
 	do
 	{
-		size_t codepoint_length = codepoint_decoded_length[(uint8_t)*src];
-		if (codepoint_length == 0)
-		{
-			codepoint_length = 1;
-		}
+		/* Get decoded length of next sequence */
 
-		src++;
-		srcLength--;
+		uint8_t codepoint_length = codepoint_decoded_length[(uint8_t)*input];
 
-		for (i = 1; i < codepoint_length && srcLength > 0; ++i)
+		if (codepoint_length > 1 &&
+			codepoint_length < 7)
 		{
-			if (
-				(*src & 0x80) == 0    || /* Not a continuation byte */
-				(*src & 0xC0) == 0xC0    /* Start of a new sequence */
-			)
+			/* Check all bytes of multi-byte sequence */
+
+			uint8_t i;
+
+			for (i = 0; i < codepoint_length; ++i)
 			{
-				break;
-			}
+				/* Next byte of sequence */
 
-			src++;
-			srcLength--;
+				input++;
+
+				if (input == inputEnd ||                             /* End of data */
+					codepoint_decoded_length[(uint8_t)*input] != 0)  /* Not a continuation byte */
+				{
+					break;
+				}
+			}
+		}
+		else
+		{
+			/* Skip to next sequence */
+
+			input++;
 		}
 	}
-	while (--offset > 0 && srcLength > 0);
+	while (input < inputEnd &&
+		--offset > 0);
 
-	return src;
+	return input;
 }
 
-const char* seeking_rewind(const char* srcStart, const char* src, size_t srcLength, off_t offset)
+const char* seeking_rewind(const char* inputStart, const char* input, size_t inputLength, off_t offset)
 {
-	if (srcStart >= src || offset >= 0 || srcLength == 0)
+	const char* marker;
+	const char* marker_valid;
+
+	if (inputStart >= input ||  /* Swapped parameters */
+		offset >= 0 ||          /* Invalid offset */
+		inputLength == 0)       /* Nothing to do */
 	{
-		return src;
+		return input;
 	}
-	if (-offset >= (off_t)srcLength)
+	else if (
+		-offset >= (off_t)inputLength)  /* Out of bounds */
 	{
-		return srcStart;
+		return inputStart;
 	}
 
-	/* Ignore NUL codepoint */
-	src--;
+	/* Set up the marker */
 
-	while (src != srcStart)
+	marker = input - 1;
+	marker_valid = marker;
+
+	do
 	{
-		if (
-			(*src & 0x80) == 0 ||    /* ASCII */
-			(*src & 0xC0) != 0x80 || /* Malformed continuation byte */
-			(*src & 0xFE) == 0xFE    /* Illegal byte */
-		)
+		/* Move the cursor */
+
+		input--;
+
+		/* Move the marker until we encounter a valid sequence */
+
+		while (marker_valid == input)
 		{
-			++offset;
-			if (offset == 0)
+			uint8_t codepoint_length = codepoint_decoded_length[(uint8_t)*marker];
+
+			if (codepoint_length == 1 ||  /* Basic Latin */
+				codepoint_length == 7)    /* Illegal byte */
 			{
+				marker_valid = marker;
+
 				break;
+			}
+			else if (codepoint_length > 1)
+			{
+				/* Multi-byte sequence */
+
+				marker_valid = marker + codepoint_length - 1;
+
+				break;
+			}
+			else if (marker <= inputStart)
+			{
+				/* Continuation bytes only */
+
+				marker_valid = marker;
+
+				break;
+			}
+			else
+			{
+				/* Move marker to next byte */
+
+				marker--;
 			}
 		}
 
-		src--;
-	}
+		/* Read the next part of a sequence */
 
-	return src;
+		if (input <= marker_valid)
+		{
+			/* Move the cursor to the start of the sequence */
+
+			input = marker;
+
+			/* Reset the marker on the next byte */
+
+			marker--;
+			marker_valid = marker;
+		}
+	}
+	while (input >= inputStart &&
+		++offset < 0);
+
+	return input;
 }

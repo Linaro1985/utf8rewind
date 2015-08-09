@@ -2,30 +2,40 @@
 
 #include "utf8rewind.h"
 
-TEST(Utf8SeekCurrent, SwappedParameters)
+#include "helpers-seeking.hpp"
+#include "helpers-seeking.hpp"
+
+TEST(Utf8SeekCurrent, TextSwappedParameters)
 {
 	const char* t = "\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80";
 
-	const char* r = utf8seek(t, t + strlen(t), 2, SEEK_CUR);
-
-	EXPECT_EQ(t, r);
-	EXPECT_STREQ("\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80\xF0\x90\x92\x80", r);
-
-	unicode_t o = 0;
-	EXPECT_EQ(4, utf8toutf32(r, strlen(r), &o, sizeof(o), nullptr));
-	EXPECT_EQ(0x10480, o);
+	EXPECT_SEEKEQ(t, 0, 0, strlen(t), 0, SEEK_CUR);
 }
 
-TEST(Utf8SeekCurrent, ZeroOffset)
+TEST(Utf8SeekCurrent, TextZeroOffset)
 {
 	const char* t = "Banana";
 
-	const char* r = utf8seek(t + 2, t, 0, SEEK_CUR);
+	EXPECT_SEEKEQ(t, 0, 0, 0, 0, SEEK_CUR);
+}
 
-	EXPECT_EQ(t + 2, r);
-	EXPECT_STREQ("nana", r);
+TEST(Utf8SeekCurrent, TextEmpty)
+{
+	const char* t = "";
 
-	unicode_t o = 0;
-	EXPECT_EQ(4, utf8toutf32(r, strlen(r), &o, sizeof(o), nullptr));
-	EXPECT_EQ(0x6E, o);
+	EXPECT_SEEKEQ(t, 0, 0, 0, 4, SEEK_CUR);
+}
+
+TEST(Utf8SeekCurrent, TextNull)
+{
+	const char* t = "Staryou, starme";
+
+	EXPECT_EQ(nullptr, utf8seek(nullptr, t, 21, SEEK_CUR));
+}
+
+TEST(Utf8SeekCurrent, TextStartNull)
+{
+	const char* t = "Brazen";
+
+	EXPECT_EQ(t, utf8seek(t, nullptr, -4, SEEK_CUR));
 }

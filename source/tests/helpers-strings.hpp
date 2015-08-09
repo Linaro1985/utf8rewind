@@ -11,9 +11,10 @@
 
 #include "utf8rewind.h"
 
-#define EXPECT_UTF8EQ(_expected, _actual)        EXPECT_PRED_FORMAT2(::helpers::CompareUtf8Strings, _expected, _actual)
-#define EXPECT_MEMEQ(_expected, _actual, _size)  EXPECT_PRED_FORMAT3(::helpers::CompareMemory, _expected, _actual, _size)
-#define EXPECT_CPEQ(_expected, _actual)          EXPECT_PRED_FORMAT2(::helpers::CompareCodepoints, _expected, _actual)
+#define EXPECT_UTF8EQ(_expected, _actual)            EXPECT_PRED_FORMAT2(::helpers::CompareUtf8Strings, _expected, _actual)
+#define EXPECT_OFFSETEQ(_expected, _actual, _start)  EXPECT_PRED_FORMAT3(::helpers::CompareOffsets, _expected, _actual, _start)
+#define EXPECT_MEMEQ(_expected, _actual, _size)      EXPECT_PRED_FORMAT3(::helpers::CompareMemory, _expected, _actual, _size)
+#define EXPECT_CPEQ(_expected, _actual)              EXPECT_PRED_FORMAT2(::helpers::CompareCodepoints, _expected, _actual)
 
 namespace helpers {
 
@@ -26,6 +27,10 @@ namespace helpers {
 	std::string utf8(const std::vector<unicode_t>& codepoints);
 
 	std::vector<unicode_t> utf32(const std::string& text);
+
+	std::string hex(unicode_t codepoint);
+	std::string hex(unicode_t* codepoints, size_t codepointsSize);
+	std::string hex(const std::string& text);
 
 	std::string printable(unicode_t codepoint);
 	std::string printable(unicode_t* codepoints, size_t codepointsSize);
@@ -46,6 +51,10 @@ namespace helpers {
 	::testing::AssertionResult CompareUtf8Strings(
 		const char* expressionExpected, const char* expressionActual,
 		const char* textExpected, const char* textActual);
+
+	::testing::AssertionResult CompareOffsets(
+		const char* expressionExpected, const char* expressionActual, const char* expressionCount,
+		const char* offsetExpected, const char* offsetActual, const char* offsetStart);
 
 	::testing::AssertionResult CompareMemory(
 		const char* expressionExpected, const char* expressionActual, const char* expressionCount,
