@@ -30,9 +30,13 @@ class UnicodeMapping:
 		self.compositionPairs = dict()
 		self.compositionExcluded = False
 		self.offsetNFC = 0
+		self.quickNFC = 0
 		self.offsetNFD = 0
+		self.quickNFD = 0
 		self.offsetNFKC = 0
+		self.quickNFKC = 0
 		self.offsetNFKD = 0
+		self.quickNFKD = 0
 		self.numericType = "NumericType_None"
 		self.numericValue = 0
 		self.bidiMirrored = False
@@ -360,6 +364,120 @@ class QuickCheckRecord:
 		self.end = 0
 		self.value = 0
 
+class Compression:
+	def __init__(self, database):
+		self.database = database
+		self.chunk_size = 0
+		self.uncompressed_size = 0
+		self.table_index = []
+		self.table_data = []
+
+	def process(self, field, chunkSize):
+		print('Compressing property "' + field + '" with a chunk size of ' + str(chunkSize) + '...')
+
+		self.chunk_size = chunkSize
+		self.uncompressed_size = 0
+		self.table_index = []
+		self.table_data = []
+
+		for i in range(0, len(self.database.recordsOrdered), chunkSize):
+			chunk = []
+			for r in self.database.recordsOrdered[i:i + chunkSize]:
+				chunk.append(r.__dict__[field])
+
+			offset = 0
+			index = 0
+			overlapping = False
+
+			for t in range(len(self.table_data)):
+				if self.table_data[t] == chunk[offset]:
+					offset += 1
+					if offset == len(chunk):
+						overlapping = True
+						break
+				else:
+					index = t + 1
+					offset = 0
+
+			if not overlapping:
+				offset = 0
+				index = 0
+
+				if len(self.table_data) > 0:
+					for t in range(len(self.table_data) - 1, 0):
+						if self.table_data[t] != chunk[offset] or offset + 1 == len(chunk):
+							break
+						offset += 1
+					index = len(self.table_data) - offset
+
+			"""if len(self.table_index) == 396:
+				print('chunk ' + str(chunk))
+				print('overlapping ' + str(overlapping))
+				print('data_size ' + str(len(self.table_data)) + ' index_size ' + str(len(self.table_index)) + ' offset ' + str(offset) + ' index ' + str(index))
+				print('chunk_after ' + str(chunk[offset:]))
+				print('table_chunk ' + str(self.table_data[index:index+32]))
+				print('table_before ' + str(self.table_data))
+				#exit(0)"""
+
+			self.table_index.append(index)
+			self.table_data.extend(chunk[offset:])
+
+			self.uncompressed_size += len(chunk)
+
+		compressed_size = len(self.table_index) + len(self.table_data)
+		ratio = (1.0 - (compressed_size / self.uncompressed_size)) * 100.0
+		print(field + ': uncompressed ' + str(self.uncompressed_size) + ' compressed ' + str(compressed_size) + ' savings ' + ('%.2f%%' % ratio))
+
+	def render(self, header, name):
+		print('Rendering compressed data for "' + name + '"...')
+
+		header.newLine()
+		header.writeLine("const size_t " + name + "Index[" + str(len(self.table_index)) + "] = {")
+		header.indent()
+
+		count = 0
+		for c in self.table_index:
+			if (count % self.chunk_size) == 0:
+				header.writeIndentation()
+			
+			header.write('%d,' % c)
+			
+			count += 1
+			if count != len(self.table_index):
+				if (count % self.chunk_size) == 0:
+					header.newLine()
+				else:
+					header.write(' ')
+
+		header.newLine()
+		header.outdent()
+		header.writeLine("};")
+		header.writeLine("const size_t* " + name + "IndexPtr = " + name + "Index;")
+
+		header.newLine()
+
+		header.writeLine("const uint8_t " + name + "Data[" + str(len(self.table_data)) + "] = {")
+		header.indent()
+
+		count = 0
+		for c in self.table_data:
+			if (count % self.chunk_size) == 0:
+				header.writeIndentation()
+			
+			header.write('0x%02X,' % c)
+			
+			count += 1
+			if count != len(self.table_data):
+				if (count % self.chunk_size) == 0:
+					header.newLine()
+				else:
+					header.write(' ')
+
+		header.newLine()
+		header.outdent()
+		header.writeLine("};")
+		header.write("const uint8_t* " + name + "DataPtr = " + name + "Data;")
+
 class Database(libs.unicode.UnicodeVisitor):
 	def __init__(self):
 		self.verbose = False
@@ -397,11 +515,9 @@ class Database(libs.unicode.UnicodeVisitor):
 		document_blocks.parse(script_path + '/data/Blocks.txt')
 		document_blocks.accept(blocks)
 		
-		self.resolveBlocks()
+		# missing blocks and codepoints
 		
-		# missing codepoints
-		
-		self.resolveMissing()
+		self.resolveCodepoints()
 		
 		# derived normalization properties
 		
@@ -466,25 +582,29 @@ class Database(libs.unicode.UnicodeVisitor):
 				return b
 		return None
 	
-	def resolveMissing(self):
+	def resolveCodepoints(self):
+		print('Explicitly adding implied reserved blocks...')
+		
+		blocks_reserved = []
+
+		for i in range(len(self.blocks) - 1):
+			block_current = self.blocks[i]
+			block_next = self.blocks[i + 1]
+
+			if block_current.end + 1 != block_next.start:
+				reserved = UnicodeBlock(self)
+				reserved.start = block_current.end + 1
+				reserved.end = block_next.start - 1
+				reserved.name = '<reserved-%X>..<reserved-%X>' % (reserved.start, reserved.end)
+				print('Adding reserved block "' + reserved.name + '".')
+				blocks_reserved.append(reserved)
+
+		self.blocks.extend(blocks_reserved)
+		self.blocks = sorted(self.blocks, key=lambda block: block.start)
+
 		print('Adding missing codepoints to database...')
-		
-		missing = [
-			self.getBlockByName("General Punctuation"), # 2000..206F
-			self.getBlockByName("CJK Unified Ideographs Extension A"), # 3400..4DBF
-			self.getBlockByName("CJK Unified Ideographs"), # 4E00..9FFF
-			self.getBlockByName("Hangul Syllables"), # AC00..D7AF
-			self.getBlockByName("Specials"), # FFF0..FFFF
-			self.getBlockByName("CJK Unified Ideographs Extension B"), # 20000..2A6DF
-			self.getBlockByName("CJK Unified Ideographs Extension C"), # 2A700..2B73F
-			self.getBlockByName("CJK Unified Ideographs Extension D"), # 2B740..2B81F
-			self.getBlockByName("Tags"), # E0000..E007F
-			self.getBlockByName("Variation Selectors Supplement"), # E0100..E01EF
-			self.getBlockByName("<reserved-E0080>..<reserved-E00FF>"), # E0080..E00FF
-			self.getBlockByName("<reserved-E01F0>..<reserved-E0FFF>"), # E01F0..E0FFF
-		]
-		
-		for b in missing:
+
+		for b in self.blocks:
 			for c in range(b.start, b.end + 1):
 				if c not in self.records:
 					u = UnicodeMapping(self)
@@ -494,33 +614,18 @@ class Database(libs.unicode.UnicodeVisitor):
 					self.records[u.codepoint] = u
 		
 		self.recordsOrdered = sorted(self.recordsOrdered, key=lambda record: record.codepoint)
-	
-	def resolveBlocks(self):
+
 		print('Resolving blocks for entries...')
 		
 		block_index = 0
 		block_current = self.blocks[block_index]
-		
+
 		for r in self.recordsOrdered:
 			if r.codepoint > block_current.end:
 				block_index += 1
 				block_current = self.blocks[block_index]
 			r.block = block_current
 		
-		# missing from blocks data file
-		
-		block_reserved1 = UnicodeBlock(self)
-		block_reserved1.start = 0xE0080
-		block_reserved1.end = 0xE00FF
-		block_reserved1.name = "<reserved-E0080>..<reserved-E00FF>"
-		self.blocks.append(block_reserved1)
-		
-		block_reserved2 = UnicodeBlock(self)
-		block_reserved2.start = 0xE01F0
-		block_reserved2.end = 0xE0FFF
-		block_reserved2.name = "<reserved-E01F0>..<reserved-E0FFF>"
-		self.blocks.append(block_reserved2)
-	
 	def resolveQuickCheck(self):
 		print('Resolving quick check entries...')
 		
@@ -534,6 +639,10 @@ class Database(libs.unicode.UnicodeVisitor):
 		for i in range(0, nfc_length - 1):
 			current = self.qcNFCRecords[i]
 			self.qcNFCRecords[i].end = self.qcNFCRecords[i + 1].start - 1
+
+		for n in self.qcNFCRecords:
+			for r in self.recordsOrdered[n.start:n.start + n.count + 1]:
+				r.quickNFC = n.value
 		
 		# NFD
 		
@@ -545,6 +654,10 @@ class Database(libs.unicode.UnicodeVisitor):
 		for i in range(0, nfd_length - 1):
 			current = self.qcNFDRecords[i]
 			self.qcNFDRecords[i].end = self.qcNFDRecords[i + 1].start - 1
+
+		for n in self.qcNFDRecords:
+			for r in self.recordsOrdered[n.start:n.start + n.count + 1]:
+				r.quickNFD = n.value
 		
 		# NFKC
 		
@@ -556,6 +669,10 @@ class Database(libs.unicode.UnicodeVisitor):
 		for i in range(0, nfkc_length - 1):
 			current = self.qcNFKCRecords[i]
 			self.qcNFKCRecords[i].end = self.qcNFKCRecords[i + 1].start - 1
+
+		for n in self.qcNFKCRecords:
+			for r in self.recordsOrdered[n.start:n.start + n.count + 1]:
+				r.quickNFKC = n.value
 		
 		# NFKD
 		
@@ -567,6 +684,10 @@ class Database(libs.unicode.UnicodeVisitor):
 		for i in range(0, nfkd_length - 1):
 			current = self.qcNFKDRecords[i]
 			self.qcNFKDRecords[i].end = self.qcNFKDRecords[i + 1].start - 1
+
+		for n in self.qcNFKDRecords:
+			for r in self.recordsOrdered[n.start:n.start + n.count + 1]:
+				r.quickNFKD = n.value
 		
 	def resolveDecomposition(self):
 		print('Resolving decomposition...')
@@ -829,14 +950,7 @@ class Database(libs.unicode.UnicodeVisitor):
 		header.newLine()
 	
 	def writeSource(self, filepath):
-		print("Writing database to " + filepath + "...")
-		
-		command_line = sys.argv[0]
-		arguments = sys.argv[1:]
-		for a in arguments:
-			command_line += " " + a
-		
-		d = datetime.datetime.now()
+		print('Writing database to "' + os.path.realpath(filepath) + '"...')
 		
 		nfd_records = []
 		nfkd_records = []
@@ -865,32 +979,16 @@ class Database(libs.unicode.UnicodeVisitor):
 		
 		# comment header
 		
-		header = libs.header.Header(filepath)
+		header = libs.header.Header(os.path.realpath(filepath))
 		
 		header.writeLine("/*")
 		header.indent()
 		header.copyrightNotice()
 		header.outdent()
 		header.writeLine("*/")
-		
 		header.newLine()
 		
-		header.writeLine("/*")
-		header.indent()
-		header.writeLine("DO NOT MODIFY, AUTO-GENERATED")
-		header.newLine()
-		header.writeLine("Generated on:")
-		header.indent()
-		header.writeLine(d.strftime("%Y-%m-%dT%H:%M:%S"))
-		header.outdent()
-		header.newLine()
-		header.writeLine("Command line:")
-		header.indent()
-		header.writeLine(command_line)
-		header.outdent()
-		header.outdent()
-		header.writeLine("*/")
-		
+		header.generatedNotice()
 		header.newLine()
 		
 		# includes
@@ -941,16 +1039,16 @@ class Database(libs.unicode.UnicodeVisitor):
 		header.write("const size_t DecompositionDataLength = " + str(self.offset) + ";")
 	
 	def writeCaseMapping(self, filepath):
-		print("Writing case mapping to " + filepath + "...")
+		print('Writing case mapping to "' + os.path.realpath(filepath) + '"...')
 		
-		command_line = sys.argv[0]
-		arguments = sys.argv[1:]
-		for a in arguments:
+		command_line = os.path.relpath(os.path.realpath(sys.argv[0]), os.getcwd())
+
+		for a in sys.argv[1:]:
 			command_line += " " + a
 		
 		d = datetime.datetime.now()
 		
-		output = libs.header.Header(filepath)
+		output = libs.header.Header(os.path.realpath(filepath))
 		
 		# comment header
 		
@@ -1002,6 +1100,52 @@ class Database(libs.unicode.UnicodeVisitor):
 				
 				output.write("# " + r.name)
 				output.newLine()
+
+	def writeCompressed(self, filepath):
+		print('Compressing code point properties...')
+
+		compress_gc = Compression(db)
+		compress_gc.process('generalCategoryCombined', 32)
+		
+		compress_ccc = Compression(db)
+		compress_ccc.process('canonicalCombiningClass', 32)
+
+		compress_nfc = Compression(db)
+		compress_nfc.process('quickNFC', 32)
+
+		compress_nfd = Compression(db)
+		compress_nfd.process('quickNFD', 32)
+
+		compress_nfkc = Compression(db)
+		compress_nfkc.process('quickNFKC', 32)
+
+		compress_nfkd = Compression(db)
+		compress_nfkd.process('quickNFKD', 32)
+
+		print('Writing compresed data to "' + os.path.realpath(filepath) + '"...')
+
+		header = libs.header.Header(os.path.realpath(filepath))
+		header.generatedNotice()
+
+		header.newLine()
+		header.writeLine("#include \"compressedproperties.h\"")
+
+		compress_gc.render(header, 'GeneralCategory')
+		header.newLine()
+		
+		compress_ccc.render(header, 'CanonicalCombiningClass')
+		header.newLine()
+
+		compress_nfc.render(header, 'QuickCheckNFC')
+		header.newLine()
+
+		compress_nfd.render(header, 'QuickCheckNFD')
+		header.newLine()
+
+		compress_nfkc.render(header, 'QuickCheckNFKC')
+		header.newLine()
+
+		compress_nfkd.render(header, 'QuickCheckNFKD')
 
 class SpecialCasing(libs.unicode.UnicodeVisitor):
 	def __init__(self, db):
@@ -1180,8 +1324,9 @@ if __name__ == '__main__':
 	
 	db = Database()
 	db.loadFromFiles(args)
-	
+
 	db.executeQuery(args.query)
 	
 	db.writeSource(script_path + '/../../source/unicodedatabase.c')
+	db.writeCompressed(script_path + '/../../source/internal/compressedproperties.c')
 	db.writeCaseMapping(script_path + '/../../testdata/CaseMapping.txt')
